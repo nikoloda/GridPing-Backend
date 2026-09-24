@@ -21,7 +21,7 @@ const USE_LOCAL_SQLITE = false
 db_path = "../test_simple_grid_database.sqlite"
 
 
-ideal_case_path = "../cases/case2383wp.m"
+ideal_case_path = "../cases/transmission/case2383wp.m"
 
 
 # Solve the ideal case once to have a baseline for comparison
@@ -48,10 +48,10 @@ ideal_bus_status, ideal_nominal_voltage = solve_ideal_baseline(ideal_case_path)
 
 
 # "Standard" 24 hr case files (No outages, islands, non-converged etc.)
-case_dir = "../cases/generated_cases"
+case_dir = "../cases/transmission/generated_cases"
 
 # Event cases directory
-event_dir = "../cases/event_cases"
+event_dir = "../cases/transmission/event_cases"
 
 # Parameter to set the meter being simulate
 meter_bus_id = 6

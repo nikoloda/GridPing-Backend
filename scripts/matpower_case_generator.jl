@@ -8,8 +8,8 @@ load_curve = [
 ]
 
 # Load the base case and create the output directory
-network = PowerModels.parse_file("cases/case2383wp.m")
-output_dir = "data/generated_cases"
+network = PowerModels.parse_file("cases/transmission/case2383wp.m")
+output_dir = "cases/transmission/generated_cases"
 mkpath(output_dir)
 
 # 2. Raw solver initialization (Warning: This will print the Ipopt log to the console)
