@@ -79,6 +79,8 @@ Defaults: bus `6`, 24 hourly steps, 45 s between readings, Postgres on (`USE_AWS
 
 Optional long-running variant: `julia scripts/meter_reading_simulator_forever.jl`.
 
+Distribution debug (single `Master-unbal.dss` solve, no loop): `julia scripts/distribution_meter_reading_simulator_once.jl`.
+
 ### 5. Other scripts
 
 ```bash
@@ -101,6 +103,8 @@ Implemented in `lambda/index.mjs`. Matches table layout from `DB_AWS_PostgreSQL.
 | `last_outage` | `bus_id`, `target_time` | Latest outage row for bus |
 
 `target_time`: `YYYY-MM-DD HH:mm:ss`. Response shape: `{ query, target_time, count, rows[] }`.
+
+**`bus_id` values:** transmission poller uses `6`; distribution meter `SX_293471A` uses **`293471`** (`distribution_meter_reading_simulator.jl`).
 
 ## Project structure
 
