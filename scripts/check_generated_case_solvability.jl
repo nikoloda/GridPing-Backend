@@ -5,7 +5,7 @@ using JuMP
 # 1. Silence PowerModels (Memento.jl) warnings globally
 PowerModels.silence()
 
-const CASE_DIR = abspath(joinpath(@__DIR__, "..", "cases", "generated_cases"))
+const CASE_DIR = abspath(joinpath(@__DIR__, "..", "cases", "transmission", "generated_cases"))
 const CASE_FILES = sort(filter(f -> startswith(f, "hourly_case_") && endswith(f, ".m"), readdir(CASE_DIR)))
 const ACCEPTED_STATUSES = Set(["LOCALLY_SOLVED", "ALMOST_LOCALLY_SOLVED", "OPTIMAL"])
 
