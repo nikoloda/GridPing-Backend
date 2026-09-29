@@ -79,13 +79,15 @@ Defaults: bus `6`, 24 hourly steps, 45 s between readings, Postgres on (`USE_AWS
 
 Optional long-running variant: `julia scripts/meter_reading_simulator_forever.jl`.
 
+Distribution poller (8500-Node, bus `293471`): `julia scripts/distribution_meter_reading_simulator.jl`.
+
 Distribution debug (single `Master-unbal.dss` solve, no loop): `julia scripts/distribution_meter_reading_simulator_once.jl`.
 
 ### 5. Other scripts
 
 ```bash
 julia scripts/check_generated_case_solvability.jl
-julia scripts/matpower_case_generator.jl    # see script for args / output dir
+julia scripts/matpower_case_generator.jl    # generate transmission cases
 julia db_manual/clear_postgres_records.jl     # destructive — truncates AWS tables
 ```
 
@@ -105,6 +107,17 @@ Implemented in `lambda/index.mjs`. Matches table layout from `DB_AWS_PostgreSQL.
 `target_time`: `YYYY-MM-DD HH:mm:ss`. Response shape: `{ query, target_time, count, rows[] }`.
 
 **`bus_id` values:** transmission poller uses `6`; distribution meter `SX_293471A` uses **`293471`** (`distribution_meter_reading_simulator.jl`).
+
+**Frontend PQ mapping:** see [`frontend/gridData.js`](frontend/gridData.js) (drop-in for smartMeter `src/utils/gridData.js`).
+
+Both pollers write the same field: **`power_quality` = Δv (p.u.)** = meter voltage − ideal voltage at that meter. Non-converged: **`-100`**, `status = 0`.
+
+| Ideal case | `bus_id` |
+|------------|----------|
+| `case2383wp.m` | `6` |
+| `Master-unbal.dss` at **min diurnal loadmult** | `293471` |
+
+**0–100% dial** is computed in [`frontend/gridData.js`](frontend/gridData.js)
 
 ## Project structure
 

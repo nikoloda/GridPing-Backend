@@ -8,7 +8,7 @@ using Dates
 cd(@__DIR__)
 
 # Silence PowerModels/Memento warnings and keep Ipopt output quiet
-silence()
+# silence()
 
 # Import DB operations
 include("../src/DB_AWS_PostgreSQL.jl")
@@ -21,7 +21,7 @@ const USE_LOCAL_SQLITE = false
 db_path = "../test_simple_grid_database.sqlite"
 
 
-ideal_case_path = "../cases/distribution/Master-unbal.dss"
+ideal_case_path = "../cases/distribution/8500-Node/Master-unbal.dss"
 
 # GRID EDGE: Phase A residential meter at SX_293471A (Primary node 293471).
 # Service drop: Line.Tpx293471A0  bus1=X_293471A.1.2  Bus2=SX_293471A.1.2  linecode=4/0Triplex  length=50 ft
@@ -35,15 +35,22 @@ function bus_voltage_pu(bus)
     return bus["w"][1]
 end
 
-# Solve the ideal case once to have a baseline for comparison
-function solve_ideal_baseline(case_path)
-    println("[db_population_poller] solving ideal case for reference voltages")
+function scale_network_loads!(network, load_mult)
+    for (_, load) in network["load"]
+        load["pd_nom"] *= load_mult
+        load["qd_nom"] *= load_mult
+    end
+end
 
-    ideal_sys = parse_file(case_path)
-    silent_solver = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)
-    ideal_result = solve_mc_pf(ideal_sys, LinDist3FlowPowerModel, silent_solver)
+# Ideal = min diurnal load (transmission still uses fixed case2383; dist PQ is vs lightest day).
+function solve_ideal_baseline(network, silent_solver, load_mult)
+    println("[db_population_poller] solving ideal at loadmult=$load_mult")
+
+    sys = deepcopy(network)
+    scale_network_loads!(sys, load_mult)
+    ideal_result = solve_mc_pf(sys, LinDist3FlowPowerModel, silent_solver)
     ideal_status = haskey(ideal_result, "termination_status") ? string(ideal_result["termination_status"]) : "UNKNOWN"
-    if ideal_status != "LOCALLY_SOLVED" || !haskey(ideal_result, "solution")
+    if !occursin("LOCALLY_SOLVED", ideal_status) || !haskey(ideal_result, "solution")
         error("Ideal case did not solve cleanly: $ideal_status")
     end
 
@@ -54,15 +61,44 @@ function solve_ideal_baseline(case_path)
     return ideal_nominal_voltage, ideal_meter_vm
 end
 
-# Solve the ideal case once to have a baseline for comparison
-ideal_nominal_voltage, ideal_meter_vm = solve_ideal_baseline(ideal_case_path)
+# Diurnal curve for 24 hr case files (No outages, islands, non-converged etc.)
+# Taken from loadshape.dss in OpenDSS
 
+diurnal_curve = [
+    0.677, 0.6256, 0.6087, 0.5833, 0.58028, 0.6025, 0.657, 0.7477, 0.832, 0.88, 0.94, 0.989,
+    0.985, 0.98, 0.9898, 0.999, 1, 0.958, 0.936, 0.913, 0.876, 0.876, 0.828, 0.756,
+]
 
-# "Standard" 24 hr case files (No outages, islands, non-converged etc.)
-case_dir = "../cases/transmission/generated_cases"
+const diurnal_min_mult = minimum(diurnal_curve)
 
-# Event cases directory
-event_dir = "../cases/transmission/event_cases"
+# Extra loadmult factors on diurnal (rand() < interrupt_prob). Third flag: scale only SX_293471A loads.
+# Outage rows only when PF does not converge (status=0, pq=-100), same as transmission.
+const LOAD_MULT_EVENTS = [
+    # Grid wide events
+    ("city_spike", 1.6, false),
+    ("heat_wave", 1.25, false),
+    ("ev_block", 1.15, false),
+    ("solar_export", 0.85, false),
+    ("industrial_ramp", 1.35, false),
+    ("weekend_lull", 0.92, false),
+    ("grid_stress", 2.15, false),
+    ("grid_stress", 2.4, false),
+    ("grid_stress", 2.9, false),
+    ("grid_stress", 3, false),
+    ("No load", 0.0, false),
+
+    # Meter only events
+    ("home_ev", 2.8, true),
+    ("heat_pump", 1.75, true),
+    ("ac_surge", 3.2, true),
+    ("battery_export", 0.45, true)
+]
+
+# Load the base case once; scale pd_nom/qd_nom per hour in the loop
+network = parse_file(ideal_case_path)
+silent_solver = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)
+
+ideal_nominal_voltage, ideal_meter_vm = solve_ideal_baseline(network, silent_solver, diurnal_min_mult)
 
 # Determine starting hourly index (start at hour 1)
 let hourly_index = 1
@@ -70,11 +106,11 @@ let hourly_index = 1
 # Number of hourly steps; default to 24
 N_hourly = 24
 
-# Parameter to set how often the meter collects data
+# Parameter to set how often the meter collects data in seconds
 reading_interval = 45
 
 # Probability at each interval to process a random event case (0.0..1.0)
-interrupt_prob = 0.35
+interrupt_prob = 0.10
 
 
 # PRINT PARAMS:
@@ -89,23 +125,18 @@ while true
         break
     end
 
-    # FILE SELECTION:
-    # Decide whether to interrupt with a random event case
-    next_file = nothing
-    if rand() < interrupt_prob
-        # pick any event case (repeats allowed)
-        event_candidates = isdir(event_dir) ? filter(f -> endswith(lowercase(f), ".m"), readdir(event_dir, join = true)) : String[]
-        if !isempty(event_candidates)
-            next_file = event_candidates[rand(1:length(event_candidates))]
-        end
-    end
+    # FILE SELECTION: optional event interrupt, else scheduled diurnal hour.
+    diurnal_mult = diurnal_curve[hourly_index]
+    event_name = "diurnal"
+    event_factor = 1.0
+    event_meter_only = false
+    is_event = false
 
-    # If not interrupted or no event available, construct the hourly filename from counter
-    if next_file === nothing
-        # e.g. hourly_case_1.m .. hourly_case_24.m
-        candidate_path = joinpath(case_dir, "hourly_case_$(hourly_index).m")
-        next_file = candidate_path
+    if rand() < interrupt_prob
+        event_name, event_factor, event_meter_only = LOAD_MULT_EVENTS[rand(1:length(LOAD_MULT_EVENTS))]
+        is_event = true
     end
+    load_mult = diurnal_mult * (event_meter_only ? 1.0 : event_factor)
 
     # Timestamp reading
     time_stamp = Dates.format(now(), "yyyy-mm-dd HH:MM:SS")
@@ -113,10 +144,19 @@ while true
 
     # FILE PROCESSING:
 
-    # Solve file
-    sys = PowerModels.parse_file(next_file)
-    silent_solver = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)
-    result = solve_ac_pf(sys, silent_solver)
+
+    # Create a fresh network state for this hour and scale loads (real-time case gen)
+    sys = deepcopy(network)
+    scale_network_loads!(sys, load_mult)
+    if is_event && event_meter_only
+        for (_, load) in sys["load"]
+            if lowercase(string(get(load, "bus", ""))) == meter_bus_key
+                load["pd_nom"] *= event_factor
+                load["qd_nom"] *= event_factor
+            end
+        end
+    end
+    result = solve_mc_pf(sys, LinDist3FlowPowerModel, silent_solver)
 
     # Converged only on a feasible local solve (excludes LOCALLY_INFEASIBLE).
     has_solution = haskey(result, "solution") && haskey(result["solution"], "bus") && !isempty(result["solution"]["bus"])
@@ -126,14 +166,13 @@ while true
     # We should see if the grid converges and decide whether to analyze based on that
     if is_converged == 1
         # Converged
-        # Get solved bus voltages
         solved_bus = result["solution"]["bus"]
 
         # Calculate global power quality
         mean_global_voltage = mean(bus_voltage_pu(bus) for bus in values(solved_bus))
         global_pq_avg = mean_global_voltage - ideal_nominal_voltage
 
-        # Calculate power quality at the distribution meter (OpenDSS bus, stored as meter_bus_db_id in DB)
+        # Local PQ: same contract as transmission (meter V − ideal V at meter, p.u.)
         local_pq = bus_voltage_pu(solved_bus[meter_bus_key]) - ideal_meter_vm
 
         # Get the number of islands in the whole grid
@@ -170,12 +209,17 @@ while true
         close_pg(conn_pg)
     end
 
-    # Advance hourly index so sequence continues after any event interruption
-    hourly_index += 1
+    kind = is_event ? "event" : "diurnal"
+    meter_tag = event_meter_only ? "@meter" : ""
+    println("[db_population_poller] [$time_stamp] hour=$hourly_index $kind=$event_name$meter_tag×$event_factor diurnal=$diurnal_mult loadmult=$load_mult | converged=$(is_converged == 1) | islands=$num_islands | outage=$(is_converged == 0) | pq($meter_bus_db_id)=$local_pq | g_pq=$global_pq_avg | $status_str")
 
-    println("[db_population_poller] [$time_stamp] $(basename(next_file)) | converged=$(is_converged == 1) | islands=$num_islands | outage=$(is_converged == 0) | pq($meter_bus_db_id)=$local_pq | g_pq=$global_pq_avg | $status_str")
-
+    # Advance only after the scheduled diurnal hour. Events replay the same hour index to ensure all 24 diurnal hours are simulated.
+    if !is_event
+        hourly_index += 1
+    end
+    
     sleep(reading_interval)
 end
-end
 
+println("[db_population_poller] finished $N_hourly hourly steps.")
+end

@@ -130,7 +130,7 @@ if USE_AWS_POSTGRES
     # Ensure schema exists in Postgres (mirror SQLite init)
     ensure_postgres_schema(conn_pg)
     insert_global_record_pg(conn_pg, time_stamp, global_pq_avg, num_islands, is_converged)
-    insert_record_pg(conn_pg, time_stamp, local_pq, is_converged, 6)
+    insert_record_pg(conn_pg, time_stamp, local_pq, is_converged, meter_bus_db_id)
     # peek_pg(conn_pg)
     close_pg(conn_pg)
     println("[distribution_once] postgres write complete")
