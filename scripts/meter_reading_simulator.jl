@@ -1,3 +1,7 @@
+# The main file which drives the simulation flow for transmission grid cases 
+# It acts like how a next generation smart meter would receive data and upload to the AWS DB
+
+
 using PowerModels
 using Ipopt
 using JuMP

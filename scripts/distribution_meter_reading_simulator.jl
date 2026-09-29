@@ -1,3 +1,6 @@
+# The main file which drives the simulation flow for distribution grid cases 
+# It acts like how a next generation smart meter would receive data and upload to the AWS DB
+
 using PowerModelsDistribution
 using Ipopt
 using JuMP
@@ -7,8 +10,6 @@ using Dates
 
 cd(@__DIR__)
 
-# Silence PowerModels/Memento warnings and keep Ipopt output quiet
-# silence()
 
 # Import DB operations
 include("../src/DB_AWS_PostgreSQL.jl")
@@ -21,20 +22,23 @@ const USE_LOCAL_SQLITE = false
 db_path = "../test_simple_grid_database.sqlite"
 
 
-ideal_case_path = "../cases/distribution/8500-Node/Master-unbal.dss"
+case_path = "../cases/distribution/8500-Node/Master-unbal.dss"
 
-# GRID EDGE: Phase A residential meter at SX_293471A (Primary node 293471).
+# Examined bus information: Phase A residential meter at SX_293471A (Primary node 293471) from IEEE 8500 distribution grid.
 # Service drop: Line.Tpx293471A0  bus1=X_293471A.1.2  Bus2=SX_293471A.1.2  linecode=4/0Triplex  length=50 ft
 # Meter at SX_ (house), not X_ (pole transformer), so PQ includes the triplex drop.
-meter_bus_dss = "SX_293471A"   # OpenDSS bus for power-flow lookup
+
+meter_bus_dss = "SX_293471A"   # Original OpenDSS bus number for power-flow lookup, not used in flow computation
 meter_bus_key = lowercase(meter_bus_dss)
 meter_bus_db_id = 293471       # INTEGER records.bus_id / Lambda bus_id
 
+# Function to convert bus voltage to per-unit voltage (transmission uses "vm", distribution uses "w")
 function bus_voltage_pu(bus)
     haskey(bus, "vm") && return bus["vm"]
     return bus["w"][1]
 end
 
+# Scale all the loads in the grid by a given multiplier
 function scale_network_loads!(network, load_mult)
     for (_, load) in network["load"]
         load["pd_nom"] *= load_mult
@@ -42,7 +46,8 @@ function scale_network_loads!(network, load_mult)
     end
 end
 
-# Ideal = min diurnal load (transmission still uses fixed case2383; dist PQ is vs lightest day).
+# Ideal = min diurnal load (master-unbal.dss with 0.58028 load multiplier) (different from transmission which still uses fixed case2383 peak as ideal).
+# Runs once at the beginning of the simulation to get ideal stats to use for comparison
 function solve_ideal_baseline(network, silent_solver, load_mult)
     println("[db_population_poller] solving ideal at loadmult=$load_mult")
 
@@ -72,7 +77,7 @@ diurnal_curve = [
 const diurnal_min_mult = minimum(diurnal_curve)
 
 # Extra loadmult factors on diurnal (rand() < interrupt_prob). Third flag: scale only SX_293471A loads.
-# Outage rows only when PF does not converge (status=0, pq=-100), same as transmission.
+
 const LOAD_MULT_EVENTS = [
     # Grid wide events
     ("city_spike", 1.6, false),
@@ -95,7 +100,7 @@ const LOAD_MULT_EVENTS = [
 ]
 
 # Load the base case once; scale pd_nom/qd_nom per hour in the loop
-network = parse_file(ideal_case_path)
+network = parse_file(case_path)
 silent_solver = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)
 
 ideal_nominal_voltage, ideal_meter_vm = solve_ideal_baseline(network, silent_solver, diurnal_min_mult)
@@ -125,24 +130,26 @@ while true
         break
     end
 
-    # FILE SELECTION: optional event interrupt, else scheduled diurnal hour.
     diurnal_mult = diurnal_curve[hourly_index]
-    event_name = "diurnal"
-    event_factor = 1.0
-    event_meter_only = false
-    is_event = false
 
+    # Decide whether an event occurs and set the params accordingly
     if rand() < interrupt_prob
         event_name, event_factor, event_meter_only = LOAD_MULT_EVENTS[rand(1:length(LOAD_MULT_EVENTS))]
         is_event = true
+        load_mult = diurnal_mult * (event_meter_only ? 1.0 : event_factor)
+    else
+        is_event = false
+        event_name = nothing
+        event_factor = 1.0
+        event_meter_only = false
+        load_mult = diurnal_mult
     end
-    load_mult = diurnal_mult * (event_meter_only ? 1.0 : event_factor)
 
     # Timestamp reading
     time_stamp = Dates.format(now(), "yyyy-mm-dd HH:MM:SS")
 
 
-    # FILE PROCESSING:
+    # CASE PROCESSING:
 
 
     # Create a fresh network state for this hour and scale loads (real-time case gen)
@@ -209,9 +216,8 @@ while true
         close_pg(conn_pg)
     end
 
-    kind = is_event ? "event" : "diurnal"
-    meter_tag = event_meter_only ? "@meter" : ""
-    println("[db_population_poller] [$time_stamp] hour=$hourly_index $kind=$event_name$meter_tag×$event_factor diurnal=$diurnal_mult loadmult=$load_mult | converged=$(is_converged == 1) | islands=$num_islands | outage=$(is_converged == 0) | pq($meter_bus_db_id)=$local_pq | g_pq=$global_pq_avg | $status_str")
+    event_label = is_event ? event_name : "-"
+    println("[db_population_poller] [$time_stamp] hour=$hourly_index diurnal_mult=$diurnal_mult loadmult=$load_mult event=$event_label factor=$event_factor meter_only=$event_meter_only | converged=$(is_converged == 1) | islands=$num_islands | outage=$(is_converged == 0) | pq($meter_bus_db_id)=$local_pq | g_pq=$global_pq_avg | $status_str")
 
     # Advance only after the scheduled diurnal hour. Events replay the same hour index to ensure all 24 diurnal hours are simulated.
     if !is_event
